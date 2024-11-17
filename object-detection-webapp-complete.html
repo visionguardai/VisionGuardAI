@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time Object Detection</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.10.0/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+
+        .tab-container {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #ddd;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            font-size: 16px;
+        }
+
+        .tab.active {
+            border-bottom: 2px solid #007bff;
+            color: #007bff;
+        }
+
+        .content {
+            display: none;
+        }
+
+        .content.active {
+            display: block;
+        }
+
+        .video-container {
+            position: relative;
+            margin: 20px 0;
+        }
+
+        #videoElement {
+            width: 100%;
+            max-width: 640px;
+            border-radius: 8px;
+        }
+
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            max-width: 640px;
+            height: auto;
+        }
+
+        .control-panel {
+            margin: 20px 0;
+        }
+
+        .slider-container {
+            margin: 10px 0;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            max-width: 300px;
+        }
+
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        .loading {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-size: 24px;
+            z-index: 1000;
+        }
+
+        #status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 5px;
+            background-color: #f8f9fa;
+        }
+    </style>
+</head>
+<body>
+    <div id="loadingScreen" class="loading">Loading model...</div>
+    
+    <div class="container">
+        <div class="tab-container">
+            <button class="tab active" onclick="showTab('camera')">Camera</button>
+            <button class="tab" onclick="showTab('image')">Image</button>
+            <button class="tab" onclick="showTab('settings')">Settings</button>
+        </div>
+
+        <div id="status"></div>
+
+        <div id="cameraTab" class="content active">
+            <div class="video-container">
+                <video id="videoElement" autoplay playsinline></video>
+                <canvas id="canvas"></canvas>
+            </div>
+            <button onclick="startCamera()">Start Camera</button>
+            <button onclick="stopCamera()">Stop Camera</button>
+        </div>
+
+        <div id="imageTab" class="content">
+            <input type="file" accept="image/*" onchange="handleImageUpload(event)">
+            <div class="video-container">
+                <img id="uploadedImage" style="max-width: 100%; display: none;">
+                <canvas id="imageCanvas"></canvas>
+            </div>
+        </div>
+
+        <div id="settingsTab" class="content">
+            <div class="control-panel">
+                <div class="slider-container">
+                    <label for="detectionThreshold">Detection Threshold:</label>
+                    <input type="range" id="detectionThreshold" min="1" max="100" value="50">
+                    <span id="thresholdValue">50%</span>
+                </div>
+
+                <div class="slider-container">
+                    <label for="soundVolume">Sound Volume:</label>
+                    <input type="range" id="soundVolume" min="0" max="100" value="80">
+                    <span id="volumeValue">80%</span>
+                </div>
+
+                <div class="slider-container">
+                    <label for="soundDelay">Sound Delay (seconds):</label>
+                    <input type="range" id="soundDelay" min="1" max="10" value="3">
+                    <span id="delayValue">3s</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentStream = null;
+        let model = null;
+        let isDetecting = false;
+        const synth = window.speechSynthesis;
+        let lastSpokenTime = 0;
+
+        // Settings
+        let detectionThreshold = 0.5;
+        let soundVolume = 0.8;
+        let soundDelay = 3;
+        let spokenLabels = new Set();
+
+        // Initialize settings
+        document.getElementById('detectionThreshold').addEventListener('input', (e) => {
+            detectionThreshold = e.target.value / 100;
+            document.getElementById('thresholdValue').textContent = `${e.target.value}%`;
+        });
+
+        document.getElementById('soundVolume').addEventListener('input', (e) => {
+            soundVolume = e.target.value / 100;
+            document.getElementById('volumeValue').textContent = `${e.target.value}%`;
+        });
+
+        document.getElementById('soundDelay').addEventListener('input', (e) => {
+            soundDelay = parseInt(e.target.value);
+            document.getElementById('delayValue').textContent = `${e.target.value}s`;
+        });
+
+        // Load model
+        async function loadModel() {
+            try {
+                model = await cocoSsd.load();
+                document.getElementById('loadingScreen').style.display = 'none';
+                document.getElementById('status').innerHTML = 'Model loaded successfully. Ready to detect objects.';
+            } catch (err) {
+                console.error('Error loading model:', err);
+                document.getElementById('status').innerHTML = 'Error loading model. Please refresh the page.';
+            }
+        }
+
+        // Tab functionality
+        function showTab(tabName) {
+            document.querySelectorAll('.content').forEach(content => {
+                content.classList.remove('active');
+            });
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+
+            document.getElementById(`${tabName}Tab`).classList.add('active');
+            event.currentTarget.classList.add('active');
+
+            if (tabName !== 'camera' && currentStream) {
+                stopCamera();
+            }
+        }
+
+        // Camera handling
+        async function startCamera() {
+            if (!model) {
+                alert('Please wait for the model to load');
+                return;
+            }
+
+            try {
+                const constraints = {
+                    video: {
+                        facingMode: 'environment',
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    }
+                };
+                currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+                const videoElement = document.getElementById('videoElement');
+                videoElement.srcObject = currentStream;
+                videoElement.onloadedmetadata = () => {
+                    const canvas = document.getElementById('canvas');
+                    canvas.width = videoElement.videoWidth;
+                    canvas.height = videoElement.videoHeight;
+                    isDetecting = true;
+                    detectFrame();
+                };
+            } catch (err) {
+                console.error('Error accessing camera:', err);
+                document.getElementById('status').innerHTML = 'Error accessing camera. Please check permissions.';
+            }
+        }
+
+        function stopCamera() {
+            isDetecting = false;
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+                const videoElement = document.getElementById('videoElement');
+                videoElement.srcObject = null;
+            }
+            const canvas = document.getElementById('canvas');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+
+        // Object detection on video
+        async function detectFrame() {
+            if (!isDetecting) return;
+
+            const videoElement = document.getElementById('videoElement');
+            const canvas = document.getElementById('canvas');
+            const ctx = canvas.getContext('2d');
+
+            try {
+                const predictions = await model.detect(videoElement);
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                predictions.forEach(prediction => {
+                    if (prediction.score >= detectionThreshold) {
+                        const [x, y, width, height] = prediction.bbox;
+                        
+                        // Draw rectangle
+                        ctx.strokeStyle = '#00ff00';
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(x, y, width, height);
+
+                        // Draw label background
+                        ctx.fillStyle = '#00ff00';
+                        const label = `${prediction.class} ${Math.round(prediction.score * 100)}%`;
+                        const labelWidth = ctx.measureText(label).width;
+                        ctx.fillRect(x, y - 25, labelWidth + 10, 25);
+
+                        // Draw label text
+                        ctx.fillStyle = '#000000';
+                        ctx.font = '18px Arial';
+                        ctx.fillText(label, x + 5, y - 7);
+
+                        // Speak label
+                        speakLabel(prediction.class);
+                    }
+                });
+
+                requestAnimationFrame(detectFrame);
+            } catch (err) {
+                console.error('Error in detection:', err);
+                isDetecting = false;
+                document.getElementById('status').innerHTML = 'Error during detection. Please restart the camera.';
+            }
+        }
+
+        // Image handling
+        function handleImageUpload(event) {
+            if (!model) {
+                alert('Please wait for the model to load');
+                return;
+            }
+
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const img = document.getElementById('uploadedImage');
+                    img.onload = () => detectObjectsInImage(img);
+                    img.src = e.target.result;
+                    img.style.display = 'block';
+                }
+                reader.readAsDataURL(file);
+            }
+        }
+
+        // Object detection on image
+        async function detectObjectsInImage(image) {
+            const canvas = document.getElementById('imageCanvas');
+            canvas.width = image.width;
+            canvas.height = image.height;
+            const ctx = canvas.getContext('2d');
+
+            try {
+                const predictions = await model.detect(image);
+                ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+                predictions.forEach(prediction => {
+                    if (prediction.score >= detectionThreshold) {
+                        const [x, y, width, height] = prediction.bbox;
+                        
+                        // Draw rectangle
+                        ctx.strokeStyle = '#00ff00';
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(x, y, width, height);
+
+                        // Draw label background
+                        ctx.fillStyle = '#00ff00';
+                        const label = `${prediction.class} ${Math.round(prediction.score * 100)}%`;
+                        const labelWidth = ctx.measureText(label).width;
+                        ctx.fillRect(x, y - 25, labelWidth + 10, 25);
+
+                        // Draw label text
+                        ctx.fillStyle = '#000000';
+                        ctx.font = '18px Arial';
+                        ctx.fillText(label, x + 5, y - 7);
+
+                        // Speak label
+                        speakLabel(prediction.class);
+                    }
+                });
+            } catch (err) {
+                console.error('Error in detection:', err);
+                document.getElementById('status').innerHTML = 'Error detecting objects in image.';
+            }
+        }
+
+        // Text-to-speech
+        function speakLabel(label) {
+            const now = Date.now();
+            if (now - lastSpokenTime < soundDelay * 1000) return;
+            if (spokenLabels.has(label)) return;
+
+            const utterance = new SpeechSynthesisUtterance(label);
+            utterance.volume = soundVolume;
+            synth.speak(utterance);
+            
+            lastSpokenTime = now;
+            spokenLabels.add(label);
+            
+            // Clear spoken labels after delay
+            setTimeout(() => {
+                spokenLabels.clear();
+            }, soundDelay * 1000);
+        }
+
+        // Initialize the application
+        window.onload = loadModel;
+    </script>
+</body>
+</html>
